@@ -102,3 +102,4 @@ ENV/
 
 # Idea IDE
 .idea/
+node_modules
