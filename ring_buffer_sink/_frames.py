@@ -9,7 +9,7 @@ Every frame is 8-byte aligned.  The on-disk byte layout is::
     ------  -----  -------------------------------------------
     0       1      status   (0x00 free, 0x01 writing, 0x02 ready, 0xFE padding)
     1       4      payload_len  (uint32 LE – byte length of *payload* only)
-    5       4      crc32        (uint32 LE – CRC-32 of *payload* bytes)
+    5       4      checksum     (uint32 LE – FNV-1a of *payload* bytes)
     9       N      payload      (N = payload_len)
     9+N     pad    zero-padding to next 8-byte boundary
 
@@ -34,10 +34,9 @@ All multi-byte integers are **little-endian**.
 """
 
 import struct
-import zlib
 
 # ── frame-level constants ───────────────────────────────────────────
-FRAME_HDR_SIZE = 9          # status(1) + payload_len(4) + crc32(4)
+FRAME_HDR_SIZE = 9          # status(1) + payload_len(4) + checksum(4)
 FRAME_ALIGN = 8
 
 STATUS_FREE = 0x00
@@ -54,8 +53,17 @@ def frame_total_size(payload_len):
     return (FRAME_HDR_SIZE + payload_len + FRAME_ALIGN - 1) & ~(FRAME_ALIGN - 1)
 
 
-def compute_crc32(data):
-    return zlib.crc32(data) & 0xFFFFFFFF
+_FNV_OFFSET = 0x811C9DC5
+_FNV_PRIME = 0x01000193
+
+
+def compute_checksum(data):
+    """32-bit FNV-1a checksum over *data* (pure Python, no extra deps)."""
+    h = _FNV_OFFSET
+    for b in data:
+        h ^= b
+        h = (h * _FNV_PRIME) & 0xFFFFFFFF
+    return h
 
 
 # ── record encoding ─────────────────────────────────────────────────

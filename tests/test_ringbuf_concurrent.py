@@ -2,7 +2,7 @@
 
 Every test spawns real child processes that share a single ring buffer and
 slam it with writes.  Assertions verify:
-  - no data corruption (CRC checks pass)
+  - no data corruption (FNV-1a checksums pass)
   - every non-dropped message arrives exactly once
   - message counts add up (written + dropped = sent)
 """
@@ -11,11 +11,9 @@ import multiprocessing
 import os
 import struct
 import time
-import zlib
 
 import pytest
 
-from ring_buffer_sink._frames import FRAME_ALIGN, compute_crc32, frame_total_size
 from ring_buffer_sink._ring_buffer import RingBuffer
 
 
@@ -64,6 +62,7 @@ def _run_writers(shm_path, n_writers, msgs_per_writer, payload_size, capacity):
 
     for p in procs:
         p.join(timeout=30)
+        assert p.exitcode == 0, f"writer process exit {p.exitcode}"
 
     results = {}
     while not q.empty():

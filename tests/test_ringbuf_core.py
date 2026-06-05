@@ -2,7 +2,6 @@
 
 import os
 import struct
-import zlib
 
 import pytest
 
@@ -220,8 +219,12 @@ class TestGap:
 
 class TestPadding:
     def test_padding_transparent_to_reader(self, rb_path):
-        """A frame that doesn't fit triggers padding; reader skips it."""
-        cap = 128
+        """A frame that doesn't fit contiguously triggers padding; reader skips it.
+
+        Requires capacity large enough that padding + frame fit in total free space
+        (impossible on a 128-byte ring with this frame geometry).
+        """
+        cap = 256
         rb = RingBuffer(rb_path, capacity=cap, create=True)
         small = b"s" * 7   # frame = 16
         big = b"B" * 60    # frame = align8(69) = 72
@@ -244,9 +247,9 @@ class TestPadding:
         rb.close()
 
 
-# ── CRC integrity ───────────────────────────────────────────────────
+# ── checksum integrity ───────────────────────────────────────────────
 
-class TestCRCIntegrity:
+class TestChecksumIntegrity:
     def test_corrupted_payload_skipped(self, rb_path):
         """Flip a byte in a committed frame; reader must skip it."""
         rb = RingBuffer(rb_path, capacity=4096, create=True)

@@ -12,18 +12,11 @@ import os
 import signal
 import struct
 import time
-import zlib
 
 import pytest
 
-from ring_buffer_sink._frames import (
-    FRAME_ALIGN,
-    FRAME_HDR_SIZE,
-    STATUS_READY,
-    STATUS_WRITING,
-    frame_total_size,
-)
-from ring_buffer_sink._ring_buffer import HEADER_SIZE, RingBuffer
+from ring_buffer_sink._frames import STATUS_WRITING, frame_total_size
+from ring_buffer_sink._ring_buffer import HEADER_SIZE, OFF_WRITE_POS, RingBuffer
 
 
 @pytest.fixture()
@@ -227,8 +220,8 @@ class TestCrashedFrameDetection:
 
         # Move write_pos far ahead to simulate a crashed writer scenario
         # The reader should skip the WRITING frame if the gap is large
-        current_wpos = rb._load64(8)  # OFF_WRITE_POS
-        rb._store64(8, current_wpos + cap)  # push write_pos far ahead
+        current_wpos = rb._load64(OFF_WRITE_POS)
+        rb._store64(OFF_WRITE_POS, current_wpos + cap)  # push write_pos far ahead
 
         out = rb.drain()
         assert b"before" in out

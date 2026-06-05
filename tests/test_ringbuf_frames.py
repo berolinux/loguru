@@ -13,7 +13,7 @@ from ring_buffer_sink._frames import (
     STATUS_PADDING,
     STATUS_READY,
     STATUS_WRITING,
-    compute_crc32,
+    compute_checksum,
     decode_record,
     encode_record,
     frame_total_size,
@@ -76,19 +76,24 @@ class TestFrameTotalSize:
             assert frame_total_size(n) % FRAME_ALIGN == 0
 
 
-# ── CRC-32 ──────────────────────────────────────────────────────────
+# ── FNV-1a checksum ─────────────────────────────────────────────────
 
-class TestCRC32:
+class TestChecksum:
     def test_deterministic(self):
         data = b"loguru ring buffer test"
-        assert compute_crc32(data) == compute_crc32(data)
+        assert compute_checksum(data) == compute_checksum(data)
 
     def test_different_data(self):
-        assert compute_crc32(b"aaa") != compute_crc32(b"bbb")
+        assert compute_checksum(b"aaa") != compute_checksum(b"bbb")
 
     def test_empty(self):
-        crc = compute_crc32(b"")
-        assert isinstance(crc, int) and 0 <= crc < 2**32
+        c = compute_checksum(b"")
+        assert isinstance(c, int) and 0 <= c < 2**32
+        assert c == 0x811C9DC5  # FNV-1a offset basis
+
+    def test_known_vector(self):
+        """Deterministic spot-check (FNV-1a 32-bit)."""
+        assert compute_checksum(b"foo") == 0xA9F37ED7
 
 
 # ── encode / decode round-trip ──────────────────────────────────────

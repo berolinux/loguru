@@ -7,7 +7,7 @@ Design
 * Writers claim space with a CAS loop on a monotonically increasing
   *write_pos* cursor.  No mutexes, semaphores or file locks are used.
 * A per-frame *status byte* (written with release semantics) gates the
-  reader: ``STATUS_READY`` means the payload + CRC are fully flushed.
+  reader: ``STATUS_READY`` means the payload + checksum are fully flushed.
 * When the buffer is full writers **drop** the message (non-blocking).
 
 Shared-memory layout (64-byte header + data region)
@@ -29,7 +29,6 @@ import ctypes
 import mmap
 import os
 import struct
-import zlib
 
 from ._atomics import get_lib
 from ._frames import (
@@ -39,6 +38,7 @@ from ._frames import (
     STATUS_PADDING,
     STATUS_READY,
     STATUS_WRITING,
+    compute_checksum,
     frame_total_size,
 )
 
@@ -171,56 +171,75 @@ class RingBuffer:
         """
         payload_len = len(payload)
         fsize = frame_total_size(payload_len)
-        crc = zlib.crc32(payload) & 0xFFFFFFFF
+        cksum = compute_checksum(payload)
         cap = self._capacity
 
         for _ in range(_MAX_CAS_RETRIES):
             wpos = self._load64(OFF_WRITE_POS)
             rpos = self._load64(OFF_READ_POS)
+            wmod = wpos % cap
+            rmod = rpos % cap
+            used = wpos - rpos
 
-            offset = wpos % cap
-            remaining = cap - offset
+            to_phys_end = cap - wmod
 
-            # How many bytes we actually need to advance write_pos
-            if remaining < FRAME_HDR_SIZE:
-                needed = remaining + fsize      # gap + frame at start
-            elif remaining < fsize:
-                needed = remaining + fsize      # padding + frame at start
+            if used == 0:
+                first_contig = cap
+            elif used >= cap:
+                first_contig = 0
+            elif wmod < rmod:
+                first_contig = rmod - wmod
+            else:
+                first_contig = cap - wmod
+
+            if to_phys_end < FRAME_HDR_SIZE:
+                needed = to_phys_end + fsize
+            elif first_contig < FRAME_HDR_SIZE:
+                needed = first_contig + fsize
+            elif first_contig < fsize:
+                needed = first_contig + fsize
             else:
                 needed = fsize
 
-            if wpos - rpos + needed > cap:
+            if used + needed > cap:
                 self._fetch_add64(OFF_DROP_COUNT, 1)
                 return False
 
-            # ---- case 1: tiny gap at the very end ----
-            if remaining < FRAME_HDR_SIZE:
-                new_wpos = wpos + remaining
+            # ---- case 1: tiny gap at physical end of mmap ----
+            if to_phys_end < FRAME_HDR_SIZE:
+                new_wpos = wpos + to_phys_end
                 if self._cas64(OFF_WRITE_POS, wpos, new_wpos) == wpos:
-                    # Mark gap byte so reader can see STATUS_PADDING even if
-                    # remaining >= 1 (it always is: min remaining = FRAME_ALIGN)
-                    self._store8(HEADER_SIZE + offset, STATUS_PADDING)
+                    # Mark gap byte so reader can skip the tail.
+                    self._store8(HEADER_SIZE + wmod, STATUS_PADDING)
                 continue
 
-            # ---- case 2: not enough room for this frame → padding ----
-            if remaining < fsize:
-                new_wpos = wpos + remaining
+            # ---- case 2: unread data is too close for a full header ----
+            if first_contig < FRAME_HDR_SIZE:
+                new_wpos = wpos + first_contig
                 if self._cas64(OFF_WRITE_POS, wpos, new_wpos) == wpos:
-                    doff = HEADER_SIZE + offset
-                    pad_payload_len = remaining - FRAME_HDR_SIZE
+                    if first_contig > 0:
+                        self._store8(HEADER_SIZE + wmod, STATUS_PADDING)
+                continue
+
+            # ---- case 3: frame does not fit contiguously → padding ----
+            if first_contig < fsize:
+                new_wpos = wpos + first_contig
+                if self._cas64(OFF_WRITE_POS, wpos, new_wpos) == wpos:
+                    doff = HEADER_SIZE + wmod
+                    pad_payload_len = first_contig - FRAME_HDR_SIZE
                     struct.pack_into("<II", self._mm, doff + 1,
                                     pad_payload_len, 0)
                     self._fence()
                     self._store8(doff, STATUS_PADDING)
                 continue
 
-            # ---- case 3: normal write ----
+            # ---- case 4: normal write ----
             new_wpos = wpos + fsize
             if self._cas64(OFF_WRITE_POS, wpos, new_wpos) == wpos:
-                doff = HEADER_SIZE + offset
+                doff = HEADER_SIZE + wmod
                 # Mark as "being written" first (crash guard)
                 self._store8(doff, STATUS_WRITING)
-                struct.pack_into("<II", self._mm, doff + 1, payload_len, crc)
+                struct.pack_into("<II", self._mm, doff + 1, payload_len, cksum)
                 self._mm[doff + FRAME_HDR_SIZE : doff + FRAME_HDR_SIZE + payload_len] = payload
                 self._fence()
                 self._store8(doff, STATUS_READY)
@@ -272,7 +291,7 @@ class RingBuffer:
                 return None
 
             payload_len = struct.unpack_from("<I", self._mm, doff + 1)[0]
-            crc_stored = struct.unpack_from("<I", self._mm, doff + 5)[0]
+            cksum_stored = struct.unpack_from("<I", self._mm, doff + 5)[0]
             fsize = frame_total_size(payload_len)
 
             if payload_len > cap or fsize > remaining:
@@ -292,8 +311,8 @@ class RingBuffer:
                 self._mm[doff + FRAME_HDR_SIZE : doff + FRAME_HDR_SIZE + payload_len]
             )
 
-            crc_actual = zlib.crc32(payload) & 0xFFFFFFFF
-            if crc_actual != crc_stored:
+            cksum_actual = compute_checksum(payload)
+            if cksum_actual != cksum_stored:
                 self._store64(OFF_READ_POS, rpos + fsize)
                 continue
 

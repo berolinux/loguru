@@ -8,8 +8,6 @@ import pytest
 from loguru import logger
 
 from ring_buffer_sink import RingBufferReader, RingBufferSink
-from ring_buffer_sink._frames import decode_record, encode_record
-from ring_buffer_sink._ring_buffer import RingBuffer
 
 
 @pytest.fixture(autouse=True)
